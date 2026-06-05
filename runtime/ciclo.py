@@ -22,6 +22,7 @@ from executor import avaliar, executar, executar_gancho, validar_payload
 from ferramentas import construir_ferramentas_dos_contratos, montar_argumentos_mock
 from planejador import _TOKENS_ZERO, chamar_llm, perceber
 from telemetria import Telemetria
+from open_router_client import enviar_mensagem_user_para_open_router
 
 def exibir_kpis(estado: dict, tel, inicio: float, contratos: dict):
     """Imprime painel compacto de KPIs ao final de cada etapa do loop."""
@@ -194,12 +195,9 @@ def _executar_critica(estado: dict, contratos: dict, contrato_critico: dict) -> 
     limiar = contrato_critico.get("limiar_aprovacao", 70)
 
     # tentar usar LLM se disponivel
-    chave_api = os.environ.get("OPENAI_API_KEY")
+    chave_api = os.environ.get("OPENROUTER_API_KEY")
     if chave_api:
         try:
-            from openai import OpenAI
-            cliente = OpenAI(api_key=chave_api)
-
             # montar contexto de critica
             historico_resumo = []
             for reg in estado.get("historico", []):
@@ -236,11 +234,7 @@ Responda APENAS em JSON:
   "sugestoes": ["sugestao 1", "sugestao 2"]
 }}"""
 
-            resposta = cliente.chat.completions.create(
-                model="gpt-4o-mini",
-                response_format={"type": "json_object"},
-                messages=[{"role": "user", "content": prompt_critica}],
-            )
+            resposta = enviar_mensagem_user_para_open_router(prompt_critica)
             return json.loads(resposta.choices[0].message.content)
         except Exception:
             pass  # fallback para mock

@@ -10,6 +10,7 @@ import json
 import os
 import random
 from pathlib import Path
+from open_router_client import enviar_mensagem_system_user_para_open_router
 
 try:
     from dotenv import load_dotenv
@@ -26,20 +27,13 @@ def _chamar_llm_ferramenta(prompt_sistema: str, prompt_usuario: str, campos_said
 
     Retorna (dados, uso_tokens). dados=None se falhar ou sem API key.
     """
-    chave_api = os.environ.get("OPENAI_API_KEY")
+    chave_api = os.environ.get("OPENROUTER_API_KEY")
     if not chave_api:
         return None, _TOKENS_ZERO.copy()
 
-    from openai import OpenAI
-
-    cliente = OpenAI(api_key=chave_api)
-    resposta = cliente.chat.completions.create(
-        model="gpt-4o-mini",
-        response_format={"type": "json_object"},
-        messages=[
-            {"role": "system", "content": prompt_sistema},
-            {"role": "user", "content": prompt_usuario},
-        ],
+    resposta = enviar_mensagem_system_user_para_open_router(
+        systemPrompt=prompt_sistema,
+        userPrompt=prompt_usuario,
     )
 
     uso_tokens = _TOKENS_ZERO.copy()

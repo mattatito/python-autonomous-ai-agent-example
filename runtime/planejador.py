@@ -16,6 +16,7 @@ except ImportError:
     def load_dotenv(*a, **kw): pass
 
 from ferramentas import extrair_evidencias_do_historico, montar_argumentos_mock
+from open_router_client import enviar_mensagem_system_user_para_open_router
 
 load_dotenv(Path(__file__).parent / ".env")
 
@@ -163,22 +164,16 @@ def chamar_llm(percepcao: str, contratos: dict, historico: list = None) -> tuple
 
     Retorna (plano, uso_tokens) onde uso_tokens = {prompt, completion, total}.
     """
-    chave_api = os.environ.get("OPENAI_API_KEY")
+    chave_api = os.environ.get("OPENROUTER_API_KEY")
 
     if not chave_api:
         tokens_mock = _TOKENS_ZERO.copy()
         tokens_mock["_modo"] = "mock"
         return planejador_mock(percepcao, contratos, historico or []), tokens_mock
 
-    from openai import OpenAI
-    cliente = OpenAI(api_key=chave_api)
-    resposta = cliente.chat.completions.create(
-        model="gpt-4o-mini",
-        response_format={"type": "json_object"},
-        messages=[
-            {"role": "system", "content": construir_prompt_sistema(contratos)},
-            {"role": "user", "content": percepcao},
-        ],
+    resposta = enviar_mensagem_system_user_para_open_router(
+        systemPrompt=construir_prompt_sistema(contratos),
+        userPrompt=percepcao
     )
 
     # extrair uso de tokens

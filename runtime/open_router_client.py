@@ -21,7 +21,7 @@ def cliente_open_router():
     )
     return cliente
 
-def enviar_mensagem_open_router(systemPrompt, userPrompt):
+def enviar_mensagem_system_user_para_open_router(systemPrompt, userPrompt):
     cliente = cliente_open_router()
     modeloLLM = os.environ.get("OPENROUTER_MODEL")
     resposta = cliente.chat.completions.create(
@@ -32,4 +32,15 @@ def enviar_mensagem_open_router(systemPrompt, userPrompt):
         ]
     )
     return resposta   
+
+def enviar_mensagem_user_para_open_router(userPrompt):
+    cliente = cliente_open_router()
+    modeloLLM = os.environ.get("OPENROUTER_MODEL")
+    resposta = cliente.chat.completions.create(
+        model=modeloLLM,
+        messages=[
+            {"role": "user", "content": userPrompt},
+        ]
+    )
+    return resposta
 
