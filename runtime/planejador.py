@@ -216,6 +216,29 @@ def planejador_mock(percepcao: str, contratos: dict, historico: list = None) -> 
     if tipo_agente == "task_based":
         tipo_agente = contratos.get("agente", {}).get("tipo", "task_based")
 
+    # modo plan_execute: gerar plano completo na primeira etapa
+    modo_execucao = contratos.get("planejador", {}).get("modo_execucao")
+    if modo_execucao == "plan_execute" and not historico:
+        passos = []
+        for i, nome in enumerate(nomes_ferramentas, 1):
+            habilidade = next((hab for hab in habilidades if hab["nome"] == nome), {})
+            argumentos = montar_argumentos_mock(habilidade, [])
+            passos.append({
+                "passo": i,
+                "objetivo": f"executar {nome}",
+                "ferramenta": nome,
+                "argumentos_ferramenta": argumentos,
+                "criterio_sucesso": f"{nome} executado com dados coletados",
+            })
+        primeiro_passo = passos[0] if passos else {}
+        return {
+            "plano_completo": passos,
+            "proxima_acao": "CHAMAR_FERRAMENTA",
+            "nome_ferramenta": primeiro_passo.get("ferramenta"),
+            "argumentos_ferramenta": primeiro_passo.get("argumentos_ferramenta", {}),
+            "criterio_sucesso": primeiro_passo.get("criterio_sucesso", ""),
+        }
+
     # modo interactive: simula pergunta na primeira etapa se nao ha historico
     if tipo_agente == "interactive" and not historico:
         plano = {

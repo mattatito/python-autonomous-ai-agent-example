@@ -20,7 +20,7 @@ from pathlib import Path
 from contratos import carregar_contratos, criar_estado
 from executor import avaliar, executar, executar_gancho, validar_payload
 from ferramentas import construir_ferramentas_dos_contratos, montar_argumentos_mock
-from planejador import chamar_llm, perceber
+from planejador import _TOKENS_ZERO, chamar_llm, perceber
 from telemetria import Telemetria
 
 def exibir_kpis(estado: dict, tel, inicio: float, contratos: dict):
@@ -183,6 +183,91 @@ def gerar_resumo_final(estado: dict, contratos: dict) -> str:
     return "\n".join(linhas[:max_linhas])
 
 
+def _executar_critica(estado: dict, contratos: dict, contrato_critico: dict) -> dict:
+    """Executa a fase de critica (Reflection).
+
+    Avalia as evidencias coletadas contra os criterios do critico.
+    Retorna {nota, aprovado, problemas, sugestoes}.
+    """
+    import os
+    criterios = contrato_critico.get("criterios", [])
+    limiar = contrato_critico.get("limiar_aprovacao", 70)
+
+    # tentar usar LLM se disponivel
+    chave_api = os.environ.get("OPENAI_API_KEY")
+    if chave_api:
+        try:
+            from openai import OpenAI
+            cliente = OpenAI(api_key=chave_api)
+
+            # montar contexto de critica
+            historico_resumo = []
+            for reg in estado.get("historico", []):
+                ferr = reg.get("plano", {}).get("nome_ferramenta", "?")
+                res = reg.get("resultado_acao", {})
+                aval = reg.get("avaliacao", {})
+                historico_resumo.append(
+                    f"- {ferr}: sucesso={res.get('sucesso')} qualidade={aval.get('qualidade', '?')}"
+                )
+
+            criterios_texto = "\n".join(
+                f"- {c}" if isinstance(c, str)
+                else "\n".join(f"- {k}: {v}" for k, v in c.items())
+                for c in criterios
+            )
+
+            prompt_critica = f"""Voce e o critico de um agente autonomo.
+Avalie a execucao abaixo contra os criterios.
+
+Objetivo: {estado.get('objetivo')}
+Etapas executadas:
+{chr(10).join(historico_resumo)}
+
+Criterios de avaliacao:
+{criterios_texto}
+
+Limiar de aprovacao: {limiar}/100
+
+Responda APENAS em JSON:
+{{
+  "nota": <int 0-100>,
+  "aprovado": <bool>,
+  "problemas": ["problema 1", "problema 2"],
+  "sugestoes": ["sugestao 1", "sugestao 2"]
+}}"""
+
+            resposta = cliente.chat.completions.create(
+                model="gpt-4o-mini",
+                response_format={"type": "json_object"},
+                messages=[{"role": "user", "content": prompt_critica}],
+            )
+            return json.loads(resposta.choices[0].message.content)
+        except Exception:
+            pass  # fallback para mock
+
+    # --- mock: primeira reflexao rejeita, segunda aprova ---
+    reflexoes_feitas = estado.get("reflexoes_feitas", 0)
+    if reflexoes_feitas == 0:
+        return {
+            "nota": 55,
+            "aprovado": False,
+            "problemas": [
+                "evidencias de metricas coletadas mas nao cruzadas com logs",
+                "diagnostico baseado em dados parciais",
+            ],
+            "sugestoes": [
+                "chamar buscar_logs com janela mais ampla para cruzar com metricas",
+                "incluir correlacao temporal entre metricas e deploys no diagnostico",
+            ],
+        }
+    return {
+        "nota": 85,
+        "aprovado": True,
+        "problemas": [],
+        "sugestoes": [],
+    }
+
+
 def rodar(caminho_agente: str, texto_entrada: str, modo: str = None, evento: str = None, saida: str = None, arquitetura: str = None) -> dict:
     """Roda o ciclo completo do agente."""
     caminho_agente = Path(caminho_agente).resolve()
@@ -251,16 +336,45 @@ def rodar(caminho_agente: str, texto_entrada: str, modo: str = None, evento: str
         print(f"  [perceber] contexto montado ({marcador_perceber['duracao_ms']}ms)")
 
         # --- FASE: PLANEJAR ---
-        marcador_planejar = tel.iniciar_fase("planejar", estado["etapa"])
-        plano, uso_tokens_plano = chamar_llm(percepcao, contratos, estado["historico"])
-        tel.finalizar_fase(marcador_planejar)
+        # Plan-and-Execute: se existe plano armazenado, segue o proximo passo sem chamar LLM
+        modo_execucao = contratos.get("planejador", {}).get("modo_execucao")
+        plano_armazenado = estado.get("plano_completo")
+
+        if modo_execucao == "plan_execute" and plano_armazenado:
+            marcador_planejar = tel.iniciar_fase("planejar", estado["etapa"])
+            passo_atual = plano_armazenado.pop(0)
+            plano = {
+                "proxima_acao": "CHAMAR_FERRAMENTA",
+                "nome_ferramenta": passo_atual.get("ferramenta"),
+                "argumentos_ferramenta": passo_atual.get("argumentos_ferramenta", {}),
+                "criterio_sucesso": passo_atual.get("criterio_sucesso", passo_atual.get("objetivo", "")),
+            }
+            uso_tokens_plano = _TOKENS_ZERO.copy()
+            tel.finalizar_fase(marcador_planejar)
+            passo_idx = estado.get("plan_execute_passo", 1) + 1
+            estado["plan_execute_passo"] = passo_idx
+            total_passos = estado.get("plan_execute_total", passo_idx + len(plano_armazenado))
+            print(f"  [plan_execute] seguindo plano: passo {passo_idx}/{total_passos} — {plano['nome_ferramenta']} ({marcador_planejar['duracao_ms']}ms, tokens=0)")
+        else:
+            marcador_planejar = tel.iniciar_fase("planejar", estado["etapa"])
+            plano, uso_tokens_plano = chamar_llm(percepcao, contratos, estado["historico"])
+            tel.finalizar_fase(marcador_planejar)
+
+            # Plan-and-Execute: armazenar plano completo no estado (exceto o primeiro passo)
+            if modo_execucao == "plan_execute" and plano.get("plano_completo"):
+                passos = plano["plano_completo"]
+                if len(passos) > 1:
+                    estado["plano_completo"] = passos[1:]
+                estado["plan_execute_passo"] = 1
+                estado["plan_execute_total"] = len(passos)
+                print(f"  [plan_execute] plano gerado com {len(passos)} passos")
+
+            modo_planejar = uso_tokens_plano.get("_modo", "mock")
+            print(f"  [planejar] proxima_acao={plano.get('proxima_acao')} ferramenta={plano.get('nome_ferramenta')} ({marcador_planejar['duracao_ms']}ms, tokens={uso_tokens_plano['total']}, via={modo_planejar})")
 
         # acumular tokens do planejador
         acumular_tokens(estado, uso_tokens_plano)
         tel.registrar_tokens(uso_tokens_plano)
-
-        modo_planejar = uso_tokens_plano.get("_modo", "mock")
-        print(f"  [planejar] proxima_acao={plano.get('proxima_acao')} ferramenta={plano.get('nome_ferramenta')} ({marcador_planejar['duracao_ms']}ms, tokens={uso_tokens_plano['total']}, via={modo_planejar})")
 
         # --- REASONING TRACE: exibir raciocinio se a arquitetura produzir ---
         raciocinio = plano.get("raciocinio")
@@ -364,6 +478,72 @@ def rodar(caminho_agente: str, texto_entrada: str, modo: str = None, evento: str
                     "criterio_sucesso": f"{faltantes[0]} obrigatorio antes de finalizar",
                 }
                 print(f"  [regras] redirecionando para: {faltantes[0]}")
+
+        # --- FASE: REFLEXAO (Reflection) ---
+        # Se o planner decidiu FINALIZAR e existe contrato critico, rodar autocritica
+        contrato_critico = contratos.get("critico")
+        if plano.get("proxima_acao") == "FINALIZAR" and contrato_critico:
+            reflexoes_feitas = estado.get("reflexoes_feitas", 0)
+            max_reflexoes = contrato_critico.get("max_reflexoes", 2)
+            limiar = contrato_critico.get("limiar_aprovacao", 70)
+
+            if reflexoes_feitas < max_reflexoes:
+                marcador_reflexao = tel.iniciar_fase("refletir", estado["etapa"])
+                critica = _executar_critica(estado, contratos, contrato_critico)
+                tel.finalizar_fase(marcador_reflexao)
+
+                nota = critica.get("nota", 100)
+                aprovado = critica.get("aprovado", True)
+                problemas_critica = critica.get("problemas", [])
+                sugestoes = critica.get("sugestoes", [])
+
+                tel.registrar("reflexao", {
+                    "nota": nota,
+                    "aprovado": aprovado,
+                    "reflexao_numero": reflexoes_feitas + 1,
+                    "problemas": problemas_critica,
+                })
+
+                if aprovado or nota >= limiar:
+                    print(f"  [reflexao] aprovado! nota={nota}/100 ({marcador_reflexao['duracao_ms']}ms)")
+                else:
+                    estado["reflexoes_feitas"] = reflexoes_feitas + 1
+                    print(f"  [reflexao] rejeitado. nota={nota}/100, limiar={limiar} ({marcador_reflexao['duracao_ms']}ms)")
+                    for p in problemas_critica:
+                        print(f"    problema: {p}")
+                    for s in sugestoes:
+                        print(f"    sugestao: {s}")
+
+                    # redirecionar para a ferramenta sugerida (ou a primeira nao-obrigatoria)
+                    ferramenta_correcao = None
+                    if sugestoes:
+                        habilidades_nomes = {h["nome"] for h in contratos.get("habilidades", {}).get("habilidades", [])}
+                        for sug in sugestoes:
+                            for hn in habilidades_nomes:
+                                if hn in str(sug):
+                                    ferramenta_correcao = hn
+                                    break
+                            if ferramenta_correcao:
+                                break
+                    if not ferramenta_correcao:
+                        # fallback: repetir a primeira ferramenta de coleta
+                        habilidades_lista = contratos.get("habilidades", {}).get("habilidades", [])
+                        ferramenta_correcao = habilidades_lista[0]["nome"] if habilidades_lista else None
+
+                    if ferramenta_correcao:
+                        hab_correcao = next(
+                            (h for h in contratos.get("habilidades", {}).get("habilidades", [])
+                             if h["nome"] == ferramenta_correcao), {}
+                        )
+                        plano = {
+                            "proxima_acao": "CHAMAR_FERRAMENTA",
+                            "nome_ferramenta": ferramenta_correcao,
+                            "argumentos_ferramenta": montar_argumentos_mock(hab_correcao, estado["historico"]),
+                            "criterio_sucesso": f"correcao apos reflexao: {'; '.join(problemas_critica[:2])}",
+                        }
+                        print(f"  [reflexao] redirecionando para: {ferramenta_correcao}")
+            else:
+                print(f"  [reflexao] max reflexoes atingido ({max_reflexoes}). finalizando.")
 
         # --- FASE: AGIR ---
         resultado_acao = None
