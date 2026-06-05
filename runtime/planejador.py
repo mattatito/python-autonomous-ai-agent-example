@@ -80,6 +80,22 @@ def construir_prompt_sistema(contratos: dict) -> str:
     regras_planejador = planejador.get("regras", [])
     texto_regras = "\n".join(f"- {regra}" for regra in regras_planejador) if regras_planejador else ""
 
+    # formato de saida — lido do contrato (permite que arquiteturas mudem o formato)
+    formato_saida = planejador.get("formato_saida", {})
+    if isinstance(formato_saida, dict) and formato_saida:
+        campos_formato = []
+        for campo, descricao in formato_saida.items():
+            campos_formato.append(f'  "{campo}": "{descricao}"')
+        bloco_formato = "{\n" + ",\n".join(campos_formato) + "\n}"
+    else:
+        bloco_formato = """{
+  "proxima_acao": "CHAMAR_FERRAMENTA" ou "FINALIZAR" ou "PERGUNTAR_USUARIO",
+  "nome_ferramenta": "nome da ferramenta (obrigatorio se CHAMAR_FERRAMENTA)",
+  "argumentos_ferramenta": {},
+  "criterio_sucesso": "o que define sucesso para esta etapa",
+  "pergunta": "pergunta para o usuario (obrigatorio se PERGUNTAR_USUARIO)"
+}"""
+
     # politicas do agente
     politicas = contratos.get("regras", {}).get("politicas", [])
     texto_politicas = "\n".join(f"- {politica}" for politica in politicas) if politicas else ""
@@ -120,13 +136,7 @@ Etapas do ciclo: {' -> '.join(etapas) if etapas else 'perceber -> planejar -> ag
 Ferramentas disponiveis:
 {bloco_ferramentas}
 Formato de resposta (APENAS JSON valido):
-{{
-  "proxima_acao": "CHAMAR_FERRAMENTA" ou "FINALIZAR" ou "PERGUNTAR_USUARIO",
-  "nome_ferramenta": "nome da ferramenta (obrigatorio se CHAMAR_FERRAMENTA)",
-  "argumentos_ferramenta": {{}},
-  "criterio_sucesso": "o que define sucesso para esta etapa",
-  "pergunta": "pergunta para o usuario (obrigatorio se PERGUNTAR_USUARIO)"
-}}
+{bloco_formato}
 
 CRITICO: o campo "proxima_acao" DEVE ser exatamente um destes 3 valores:
 - "CHAMAR_FERRAMENTA" — para executar uma ferramenta
@@ -156,7 +166,9 @@ def chamar_llm(percepcao: str, contratos: dict, historico: list = None) -> tuple
     chave_api = os.environ.get("OPENAI_API_KEY")
 
     if not chave_api:
-        return planejador_mock(percepcao, contratos, historico or []), _TOKENS_ZERO.copy()
+        tokens_mock = _TOKENS_ZERO.copy()
+        tokens_mock["_modo"] = "mock"
+        return planejador_mock(percepcao, contratos, historico or []), tokens_mock
 
     from openai import OpenAI
     cliente = OpenAI(api_key=chave_api)
@@ -180,14 +192,21 @@ def chamar_llm(percepcao: str, contratos: dict, historico: list = None) -> tuple
 
     try:
         plano = json.loads(resposta.choices[0].message.content)
+        uso_tokens["_modo"] = "llm"
         return plano, uso_tokens
     except (json.JSONDecodeError, IndexError):
+        uso_tokens["_modo"] = "llm"
         return {"proxima_acao": "FINALIZAR", "criterio_sucesso": "Resposta da LLM nao interpretavel"}, uso_tokens
 def planejador_mock(percepcao: str, contratos: dict, historico: list = None) -> dict:
     """Planejador mock generico - percorre as ferramentas em ordem."""
     habilidades = contratos.get("habilidades", {}).get("habilidades", [])
     nomes_ferramentas = [habilidade["nome"] for habilidade in habilidades if "nome" in habilidade]
     historico = historico or []
+
+    # detecta se a arquitetura produz raciocinio (campo presente no formato_saida)
+    formato_saida = contratos.get("planejador", {}).get("formato_saida", {})
+    inclui_raciocinio = "raciocinio" in formato_saida
+
     # detecta tipo do agente: primeiro da percepcao (CLI), depois do contrato
     tipo_agente = "task_based"
     for linha in percepcao.split("\n"):
@@ -199,25 +218,33 @@ def planejador_mock(percepcao: str, contratos: dict, historico: list = None) -> 
 
     # modo interactive: simula pergunta na primeira etapa se nao ha historico
     if tipo_agente == "interactive" and not historico:
-        return {
+        plano = {
             "proxima_acao": "PERGUNTAR_USUARIO",
             "nome_ferramenta": None,
             "argumentos_ferramenta": None,
             "criterio_sucesso": "obter informacoes iniciais do usuario",
             "pergunta": "Qual servico esta com problema e desde quando voce observou o alerta?",
         }
+        if inclui_raciocinio:
+            plano["raciocinio"] = "A entrada e ambigua. Faltam dados criticos como nome do servico e janela de tempo. Preciso perguntar antes de agir."
+        return plano
 
     # descobre qual a proxima ferramenta nao usada
+    ferramentas_usadas = [nome for nome in nomes_ferramentas if nome in percepcao]
     for nome in nomes_ferramentas:
         if nome not in percepcao:
             habilidade = next((hab for hab in habilidades if hab["nome"] == nome), {})
             argumentos = montar_argumentos_mock(habilidade, historico)
-            return {
+            plano = {
                 "proxima_acao": "CHAMAR_FERRAMENTA",
                 "nome_ferramenta": nome,
                 "argumentos_ferramenta": argumentos,
                 "criterio_sucesso": f"{nome} executado com sucesso",
             }
+            if inclui_raciocinio:
+                ja_coletei = ", ".join(ferramentas_usadas) if ferramentas_usadas else "nada ainda"
+                plano["raciocinio"] = f"Ja coletei: {ja_coletei}. Proximo passo logico: chamar {nome} para obter mais evidencias."
+            return plano
 
     # monta resumo do que foi coletado para o criterio de sucesso
     evidencias = extrair_evidencias_do_historico(historico)
@@ -227,9 +254,12 @@ def planejador_mock(percepcao: str, contratos: dict, historico: list = None) -> 
         resumo_partes.append(f"[{nome_ferramenta}] {campos}")
     resumo = " | ".join(resumo_partes) if resumo_partes else "sem evidencias"
 
-    return {
+    plano = {
         "proxima_acao": "FINALIZAR",
         "nome_ferramenta": None,
         "argumentos_ferramenta": None,
         "criterio_sucesso": f"Diagnostico: {resumo}",
     }
+    if inclui_raciocinio:
+        plano["raciocinio"] = f"Todas as ferramentas foram chamadas. Evidencias coletadas: {', '.join(evidencias.keys())}. Posso finalizar com diagnostico."
+    return plano

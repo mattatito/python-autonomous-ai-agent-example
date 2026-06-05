@@ -250,6 +250,7 @@ def main():
     parser_rodar.add_argument("--entrada", required=True, help="Entrada do agente (ex: alerta de latencia)")
     parser_rodar.add_argument("--modo", required=False, help="Modo de operacao (task_based, interactive, goal_oriented, autonomous)")
     parser_rodar.add_argument("--evento", required=False, help="Evento trigger para modo autonomous (ex: alerta_cpu, deploy_falhou)")
+    parser_rodar.add_argument("--arquitetura", required=False, help="Arquitetura cognitiva (react, plan_execute, reflect)")
 
     # validar
     parser_validar = subparsers.add_parser("validar", help="Valida os contratos do agente")
@@ -275,6 +276,7 @@ def main():
             texto_entrada=argumentos.entrada,
             modo=argumentos.modo,
             evento=argumentos.evento,
+            arquitetura=getattr(argumentos, "arquitetura", None),
         )
     elif argumentos.comando == "validar":
         validar(caminho_agente=argumentos.agente)

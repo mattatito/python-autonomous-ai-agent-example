@@ -183,11 +183,11 @@ def gerar_resumo_final(estado: dict, contratos: dict) -> str:
     return "\n".join(linhas[:max_linhas])
 
 
-def rodar(caminho_agente: str, texto_entrada: str, modo: str = None, evento: str = None, saida: str = None) -> dict:
+def rodar(caminho_agente: str, texto_entrada: str, modo: str = None, evento: str = None, saida: str = None, arquitetura: str = None) -> dict:
     """Roda o ciclo completo do agente."""
     caminho_agente = Path(caminho_agente).resolve()
-    contratos = carregar_contratos(caminho_agente)
-    estado = criar_estado(contratos, texto_entrada, modo=modo, evento=evento)
+    contratos = carregar_contratos(caminho_agente, arquitetura=arquitetura)
+    estado = criar_estado(contratos, texto_entrada, modo=modo, evento=evento, arquitetura=arquitetura)
     ferramentas = construir_ferramentas_dos_contratos(contratos)
     contrato_ganchos = contratos.get("ganchos", {})
     inicio = time.time()
@@ -211,6 +211,8 @@ def rodar(caminho_agente: str, texto_entrada: str, modo: str = None, evento: str
     print(f"  Entrada: {estado['entrada']}")
     if estado.get("evento"):
         print(f"  Evento: {estado['evento']}")
+    if estado.get("arquitetura") and estado["arquitetura"] != "padrao":
+        print(f"  Arquitetura: {estado['arquitetura']}")
     print(f"  Max etapas: {estado['max_etapas']}")
     print(f"  Limite tempo: {estado['limite_tempo_segundos']}s")
     print(f"  Limite tokens: {estado.get('max_tokens', 50000)}")
@@ -257,7 +259,13 @@ def rodar(caminho_agente: str, texto_entrada: str, modo: str = None, evento: str
         acumular_tokens(estado, uso_tokens_plano)
         tel.registrar_tokens(uso_tokens_plano)
 
-        print(f"  [planejar] proxima_acao={plano.get('proxima_acao')} ferramenta={plano.get('nome_ferramenta')} ({marcador_planejar['duracao_ms']}ms, tokens={uso_tokens_plano['total']})")
+        modo_planejar = uso_tokens_plano.get("_modo", "mock")
+        print(f"  [planejar] proxima_acao={plano.get('proxima_acao')} ferramenta={plano.get('nome_ferramenta')} ({marcador_planejar['duracao_ms']}ms, tokens={uso_tokens_plano['total']}, via={modo_planejar})")
+
+        # --- REASONING TRACE: exibir raciocinio se a arquitetura produzir ---
+        raciocinio = plano.get("raciocinio")
+        if raciocinio:
+            print(f"  [raciocinio] {raciocinio}")
 
         # --- CIRCUIT BREAKER: validar resposta da LLM antes de prosseguir ---
         problemas_llm = validar_resposta_llm(plano, nomes_ferramentas_disponiveis)
@@ -504,7 +512,9 @@ def rodar(caminho_agente: str, texto_entrada: str, modo: str = None, evento: str
     # salvar rastreamento com telemetria completa
     dados_rastreamento = {
         "trace_id": tel.trace_id,
+        "agente": caminho_agente.name,
         "tipo_agente": estado.get("tipo_agente", "task_based"),
+        "arquitetura": estado.get("arquitetura", "padrao"),
         "entrada": estado["entrada"],
         "evento": estado.get("evento"),
         "tempo_total_segundos": tempo_total,

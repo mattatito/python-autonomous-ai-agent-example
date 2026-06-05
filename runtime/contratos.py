@@ -21,11 +21,15 @@ def carregar_yaml_do_md(caminho_arquivo: Path) -> dict:
     return yaml.safe_load(correspondencia.group(1)) or {}
 
 
-def carregar_contratos(caminho_agente: Path) -> dict:
-    """Carrega todos os contratos de um agente."""
+def carregar_contratos(caminho_agente: Path, arquitetura: str = None) -> dict:
+    """Carrega todos os contratos de um agente.
+
+    Se ``arquitetura`` for informada, sobrescreve planner.md e executor.md
+    com os da pasta ``architectures/<arquitetura>/``.
+    """
     pasta_contratos = caminho_agente / "contracts"
 
-    return {
+    contratos = {
         "agente": carregar_yaml_do_md(caminho_agente / "agent.md"),
         "ciclo": carregar_yaml_do_md(pasta_contratos / "loop.md"),
         "planejador": carregar_yaml_do_md(pasta_contratos / "planner.md"),
@@ -37,8 +41,29 @@ def carregar_contratos(caminho_agente: Path) -> dict:
         "memoria": carregar_yaml_do_md(caminho_agente / "memory.md"),
     }
 
+    if arquitetura:
+        raiz = Path(caminho_agente).resolve().parent
+        pasta_arq = raiz / "architectures" / arquitetura
+        if not pasta_arq.exists():
+            print(f"  [aviso] pasta de arquitetura nao encontrada: {pasta_arq}")
+        else:
+            planner_arq = carregar_yaml_do_md(pasta_arq / "planner.md")
+            executor_arq = carregar_yaml_do_md(pasta_arq / "executor.md")
+            if planner_arq:
+                contratos["planejador"] = planner_arq
+                print(f"  [arquitetura] planner.md carregado de {arquitetura}/")
+            if executor_arq:
+                contratos["executor"] = executor_arq
+                print(f"  [arquitetura] executor.md carregado de {arquitetura}/")
+            critic_arq = carregar_yaml_do_md(pasta_arq / "critic.md")
+            if critic_arq:
+                contratos["critico"] = critic_arq
+                print(f"  [arquitetura] critic.md carregado de {arquitetura}/")
 
-def criar_estado(contratos: dict, texto_entrada: str, modo: str = None, evento: str = None) -> dict:
+    return contratos
+
+
+def criar_estado(contratos: dict, texto_entrada: str, modo: str = None, evento: str = None, arquitetura: str = None) -> dict:
     """Cria o estado inicial do agente a partir dos contratos."""
     regras = contratos.get("regras", {})
     ciclo = contratos.get("ciclo", {})
@@ -63,6 +88,7 @@ def criar_estado(contratos: dict, texto_entrada: str, modo: str = None, evento: 
         "objetivo": ciclo.get("objetivo", "desconhecido"),
         "entrada": texto_entrada,
         "tipo_agente": tipo_agente,
+        "arquitetura": arquitetura or "padrao",
         "evento": evento,
         "etapa": 0,
         "chamadas_ferramenta": 0,
